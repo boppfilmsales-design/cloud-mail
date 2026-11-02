@@ -423,6 +423,7 @@ const emailService = {
 			attachments: await this.toResendAttachments(params.attachments)
 		};
 
+		if (params.replyTo) { sendForm.reply_to = params.replyTo; }
 		if (params.sendType === 'reply') {
 			sendForm.headers = {
 				'in-reply-to': params.messageId,
