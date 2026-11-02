@@ -188,7 +188,7 @@ export async function email(message, env, ctx) {
 						if (sendResult && sendResult.error) {
 								throw new Error(sendResult.error.message || 'Resend send failed');
 						}
-						console.log('Forwarded via Resend to ' + dest + ':' + sendResult && sendResult.data && sendResult.data.id);
+						console.log('Forwarded via Resend to ' + dest + ':', sendResult && sendResult.data && sendResult.data.id);
 					} catch (e) {
 							console.error('Resend forward to ' + dest + ' failed, falling back to message.forward:', e);
 						try {
