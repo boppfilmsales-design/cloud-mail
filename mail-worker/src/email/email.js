@@ -22,6 +22,7 @@ export async function email(message, env, ctx) {
 			tgBotStatus,
 			forwardStatus,
 			forwardEmail,
+			resendTokens,
 			ruleEmail,
 			ruleType,
 			r2Domain,
@@ -163,21 +164,48 @@ export async function email(message, env, ctx) {
 		}
 
 		//转发到其他邮箱
-		if (forwardStatus === settingConst.forwardStatus.OPEN && forwardEmail) {
-
+	if (forwardStatus === settingConst.forwardStatus.OPEN && forwardEmail) {
 			const emails = forwardEmail.split(',');
-
-			await Promise.all(emails.map(async email => {
-
-				try {
-					await message.forward(email);
-				} catch (e) {
-					console.error(`转发邮箱 ${email} 失败：`, e);
+		const recipientDomain = emailUtils.getDomain(message.to);
+		const resendToken = resendTokens ? resendTokens[recipientDomain] : undefined;
+		await Promise.all(emails.map(async (dest) => {
+				if (emailUtils.getDomain(dest) === recipientDomain) {
+						console.log('Skipping forward to same domain:', dest);
+					return;
 				}
-
-			}));
-
-		}
+			if (resendToken) {
+					try {
+							const sendResult = await emailService.sendByResend(resendToken, {
+									name: params.name,
+								accountEmail: message.to,
+								receiveEmail: [dest],
+								subject: '[转发] ' + email.subject,
+								text: email.text,
+								html: '<div><p>Original sender: ' + params.name + ' &lt;' + params.sendEmail + '&gt;</p><p>Original recipient: ' + message.to + '</p><p>Original subject: ' + email.subject + '</p></div><hr />' + (email.html || ''),
+								replyTo: params.sendEmail,
+								attachments: attachments.filter((attachment) => !attachment.contentId)
+							});
+						if (sendResult && sendResult.error) {
+								throw new Error(sendResult.error.message || 'Resend send failed');
+						}
+						console.log('Forwarded via Resend to ' + dest + ':' + sendResult && sendResult.data && sendResult.data.id);
+					} catch (e) {
+							console.error('Resend forward to ' + dest + ' failed, falling back to message.forward:', e);
+						try {
+								await message.forward(dest);
+						} catch (forwardError) {
+								console.error('Fallback forward to ' + dest + ' failed:', forwardError);
+						}
+					}
+			} else {
+					try {
+							await message.forward(dest);
+					} catch (e) {
+							console.error(`转发邮箱 ${dest} 失败：`, e);
+					}
+			}
+		}));
+	}
 
 	} catch (e) {
 		console.error('邮件接收异常: ', e);
