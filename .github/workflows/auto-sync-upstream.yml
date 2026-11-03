@@ -286,7 +286,11 @@ jobs:
       - name: '健康检查'
         id: health
         env:
-          WORKER_URL: ${{ vars.CUSTOM_DOMAIN && format('https://{0}', vars.CUSTOM_DOMAIN) || '' }}
+          # ★ CUSTOM_DOMAIN 存在 Secrets 里（不是 Variables），
+          #   必须用 secrets.CUSTOM_DOMAIN；原来写 vars.CUSTOM_DOMAIN
+          #   读不到值，健康检查会静默跳过，自动回滚就失效了。
+          #   两者都取，兼容两种配置方式。
+          WORKER_URL: ${{ secrets.CUSTOM_DOMAIN && format('https://{0}', secrets.CUSTOM_DOMAIN) || vars.CUSTOM_DOMAIN && format('https://{0}', vars.CUSTOM_DOMAIN) || '' }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
         run: |
           set -euo pipefail
