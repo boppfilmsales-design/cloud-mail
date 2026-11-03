@@ -11,6 +11,7 @@ import roleService from '../service/role-service';
 import userService from '../service/user-service';
 import telegramService from '../service/telegram-service';
 import aiService from '../service/ai-service';
+import webhookService from '../service/webhook-service';
 
 export async function email(message, env, ctx) {
 
@@ -23,6 +24,10 @@ export async function email(message, env, ctx) {
 			forwardStatus,
 			forwardEmail,
 			resendTokens,
+			webhookStatus,
+			webhookUrl,
+			webhookRetry,
+			webhookSecret,
 			ruleEmail,
 			ruleType,
 			r2Domain,
@@ -58,7 +63,14 @@ export async function email(message, env, ctx) {
 			return;
 		}
 
-		const account = await accountService.selectByEmailIncludeDel({ env: env }, message.to);
+		let account = await accountService.selectByEmailIncludeDel({ env: env }, message.to);
+
+		if (!account) {
+			const baseEmail = emailUtils.getBaseEmail(message.to);
+			if (baseEmail && baseEmail !== message.to) {
+				account = await accountService.selectByEmailIncludeDel({ env: env }, baseEmail);
+			}
+		}
 
 		if (!account && noRecipient === settingConst.noRecipient.CLOSE) {
 			message.setReject('Recipient not found');
@@ -94,12 +106,14 @@ export async function email(message, env, ctx) {
 
 		const toName = email.to.find(item => item.address === message.to)?.name || '';
 		const code = await aiService.extractCode({ env }, email, { aiCode, aiCodeFilter });
+		const fromAddress = email.from?.address || '';
 
 		const params = {
 			toEmail: message.to,
 			toName: toName,
-			sendEmail: email.from.address,
-			name: email.from.name || emailUtils.getName(email.from.address),
+			sendEmail: fromAddress,
+			name: email.from?.name || emailUtils.getName(fromAddress),
+			senderEmail: message.from || '',
 			subject: email.subject,
 			code,
 			content: email.html,
@@ -163,49 +177,60 @@ export async function email(message, env, ctx) {
 			await telegramService.sendEmailToBot({ env }, emailRow)
 		}
 
-		//转发到其他邮箱
-	if (forwardStatus === settingConst.forwardStatus.OPEN && forwardEmail) {
+		// ============================================================
+		// 转发到其他邮箱（自定义补丁：Resend 优先 + 失败回退 + 同域跳过）
+		// 基于 v3.0.0 补丁适配至 v3.4.0 结构
+		// ============================================================
+		if (forwardStatus === settingConst.forwardStatus.OPEN && forwardEmail) {
+
 			const emails = forwardEmail.split(',');
-		const recipientDomain = emailUtils.getDomain(message.to);
-		const resendToken = resendTokens ? resendTokens[recipientDomain] : undefined;
-		await Promise.all(emails.map(async (dest) => {
+			const recipientDomain = emailUtils.getDomain(message.to);
+			const resendToken = resendTokens ? resendTokens[recipientDomain] : undefined;
+
+			await Promise.all(emails.map(async (dest) => {
+				// 同域名转发会造成循环，跳过
 				if (emailUtils.getDomain(dest) === recipientDomain) {
-						console.log('Skipping forward to same domain:', dest);
+					console.log('Skipping forward to same domain:', dest);
 					return;
 				}
-			if (resendToken) {
+
+				if (resendToken) {
+					// 优先用 Resend 转发：带原文头部、附件、不受 CF 转发限制
 					try {
-							const sendResult = await emailService.sendByResend(resendToken, {
-									name: params.name,
-								accountEmail: message.to,
-								receiveEmail: [dest],
-								subject: '[转发] ' + email.subject,
-								text: email.text,
-								html: '<div><p>Original sender: ' + params.name + ' &lt;' + params.sendEmail + '&gt;</p><p>Original recipient: ' + message.to + '</p><p>Original subject: ' + email.subject + '</p></div><hr />' + (email.html || ''),
-								replyTo: params.sendEmail,
-								attachments: attachments.filter((attachment) => !attachment.contentId)
-							});
+						const sendResult = await emailService.sendByResend(resendToken, {
+							name: params.name,
+							accountEmail: message.to,
+							receiveEmail: [dest],
+							subject: '[转发] ' + email.subject,
+							text: email.text,
+							html: '<div><p>Original sender: ' + params.name + ' &lt;' + params.sendEmail + '&gt;</p><p>Original recipient: ' + message.to + '</p><p>Original subject: ' + email.subject + '</p></div><hr />' + (email.html || ''),
+							replyTo: params.sendEmail,
+							attachments: attachments.filter((attachment) => !attachment.contentId)
+						});
 						if (sendResult && sendResult.error) {
-								throw new Error(sendResult.error.message || 'Resend send failed');
+							throw new Error(sendResult.error.message || 'Resend send failed');
 						}
 						console.log('Forwarded via Resend to ' + dest + ':', sendResult && sendResult.data && sendResult.data.id);
+						return;
 					} catch (e) {
-							console.error('Resend forward to ' + dest + ' failed, falling back to message.forward:', e);
-						try {
-								await message.forward(dest);
-						} catch (forwardError) {
-								console.error('Fallback forward to ' + dest + ' failed:', forwardError);
-						}
+						console.error('Resend forward to ' + dest + ' failed, falling back to message.forward:', e);
 					}
-			} else {
-					try {
-							await message.forward(dest);
-					} catch (e) {
-							console.error(`转发邮箱 ${dest} 失败：`, e);
-					}
-			}
-		}));
-	}
+				}
+
+				// 回退：原生转发（无 Resend token，或 Resend 失败时）
+				try {
+					await message.forward(dest);
+				} catch (e) {
+					console.error(`转发邮箱 ${dest} 失败：`, e);
+				}
+			}));
+
+		}
+
+		//转发到 Webhook
+		if (webhookStatus === settingConst.webhookStatus.OPEN && webhookUrl) {
+			await webhookService.sendEmail({ env }, emailRow, webhookUrl, webhookRetry, webhookSecret);
+		}
 
 	} catch (e) {
 		console.error('邮件接收异常: ', e);
