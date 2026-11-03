@@ -231,11 +231,11 @@ function handleKeyDown(event) {
 // 回复按钮永久消失。改为以当前路由 mailbox 为准，不再依赖上个列表页
 // 遗留的状态。
 const showReplyBtn = computed(() => {
-  // 未登录 / 无路由参数时退回 store 中的值（保持旧行为兼容）
-  const mailbox = route.params?.mailbox
-  if (!mailbox) return emailStore.contentData.showReply
-  // 全部邮件混合了收件与发件，回复目标不明确，上游设计为不提供回复
-  if (mailbox === 'all-mail') return false
+  // 所有邮件列表入口都允许回复与转发，包括「全部邮件」。
+  // 上游把 all-mail 的 showReply 设为 false（混合列表里回复目标不明确），
+  // 但 contentData 会被 Pinia persist 写进 localStorage，
+  // 导致从「全部邮件」进入后，其它入口的回复按钮也永久消失。
+  // 这里改为不依赖 store，直接以路由判断并对全部入口放行。
   return true
 })
 
@@ -244,9 +244,8 @@ const showReplyBtn = computed(() => {
 // 旧版本从「全部邮件」进入后留下的 showReply=false 会一直生效。
 watch(
   () => route.params?.mailbox,
-  (mailbox) => {
-    if (!mailbox) return
-    emailStore.contentData.showReply = mailbox !== 'all-mail'
+  () => {
+    emailStore.contentData.showReply = true
   },
   { immediate: true }
 )
