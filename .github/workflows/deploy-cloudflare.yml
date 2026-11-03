@@ -264,21 +264,46 @@ jobs:
           echo "🛠️ Starting database initialization..."
           sleep 15
           
-          WORKER_URL="${CUSTOM_DOMAIN:+https://$CUSTOM_DOMAIN}"
-          WORKER_URL="${WORKER_URL:-${{ steps.deploy.outputs.worker_url }}}"
-          
-          if [ -z "$WORKER_URL" ]; then
+          # ★ 多自定义域兼容
+          # CUSTOM_DOMAIN 可能是 "a.com,b.com"，直接拼进 URL 会得到非法地址。
+          # 这里对每个域名分别调用一次 init（幂等，重复执行无害）。
+          # 注意：不能用 `echo | while read` 的管道写法 ——
+          # 管道里的 while 在子 shell 执行，变量赋值不会传出函数。
+          # 这里用命令替换把多行结果一次性捕获。
+          INIT_URLS=""
+          if [ -n "$CUSTOM_DOMAIN" ]; then
+            DOMAIN_LIST=$(echo "$CUSTOM_DOMAIN" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$')
+            for D in $DOMAIN_LIST; do
+              INIT_URLS="$INIT_URLS https://$D"
+            done
+          fi
+          if [ -z "$INIT_URLS" ]; then
+            INIT_URLS="${{ steps.deploy.outputs.worker_url }}"
+          fi
+
+          if [ -z "$INIT_URLS" ]; then
             echo "❌ Preview URL not available. Please set CUSTOM_DOMAIN."
             exit 1
           fi
-          
-          HTTP_CODE=$(curl -sL -w "%{http_code}" -o response.txt "$WORKER_URL/api/init/${JWT_SECRET}")
-          RESPONSE_BODY=$(cat response.txt)
 
-          if [ "$RESPONSE_BODY" = "success" ]; then
+          ALL_OK=1
+          for INIT_URL in $INIT_URLS; do
+            echo "🔄 初始化: $INIT_URL"
+            HTTP_CODE=$(curl -sL -w "%{http_code}" -o response.txt "$INIT_URL/api/init/${JWT_SECRET}" || echo "000")
+            RESPONSE_BODY=$(cat response.txt 2>/dev/null || echo "")
+
+            if [ "$RESPONSE_BODY" = "success" ]; then
+              echo "  ✅ $INIT_URL 初始化成功"
+            else
+              echo "  ❌ $INIT_URL 失败. HTTP: $HTTP_CODE, Response: $RESPONSE_BODY"
+              ALL_OK=0
+            fi
+          done
+
+          if [ "$ALL_OK" = "1" ]; then
             echo "✅ Setup completed."
           else
-            echo "❌ Failed. HTTP: $HTTP_CODE, Response: $RESPONSE_BODY"
+            echo "❌ Failed."
             exit 1
           fi
 
