@@ -144,7 +144,11 @@ jobs:
             done
             echo "✅ 已配置自定义域: $CUSTOM_DOMAIN"
           fi
-          sed -i "s|\"\${DOMAIN}\"|${DOMAIN}|g" "$CONFIG_FILE"
+          # ★ domain 用单引号包裹（模板里是 domain = '${DOMAIN}'），
+          #   所以 sed 模式不能带双引号，否则匹配不到、占位符会原样上线。
+          #   替换后得到 domain = '["a.com","b.com"]' —— 合法 TOML，
+          #   后端 setting-service 会 JSON.parse 成数组。
+          sed -i "s|\${DOMAIN}|${DOMAIN}|g" "$CONFIG_FILE"
           sed -i "s|\${ADMIN}|${ADMIN}|g" "$CONFIG_FILE"
           sed -i "s|\${JWT_SECRET}|${JWT_SECRET}|g" "$CONFIG_FILE"
           sed -i "s|\${R2_BUCKET_NAME}|${R2_BUCKET_NAME}|g" "$CONFIG_FILE"
