@@ -5,6 +5,10 @@ compatibility_date = "2025-06-04"
 [observability]
 enabled = true
 
+# ★ 多自定义域支持
+# CUSTOM_DOMAIN 可用逗号分隔多个域名（如 "a.com,b.com"），
+# 由 deploy-cloudflare.yml 展开成多个 [[routes]] 段。
+# 单域名时保持与上游一致的写法，向后兼容。
 [[routes]]
 pattern = "${CUSTOM_DOMAIN}"
 custom_domain = true

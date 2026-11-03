@@ -124,7 +124,26 @@ jobs:
           fi
 
           sed -i "s|\${NAME}|${NAME}|g" "$CONFIG_FILE"
-          sed -i "s|\${CUSTOM_DOMAIN}|${CUSTOM_DOMAIN}|g" "$CONFIG_FILE"
+          # ★ 多自定义域展开
+          # CUSTOM_DOMAIN 支持逗号分隔多个域名，展开成多个 [[routes]] 段。
+          # 原因：单 pattern 只能绑一个域名，部署时会挤掉其它已绑定的域名，
+          #       导致其它自定义域出现 Error 1016 (Origin DNS error)。
+          if [ -n "$CUSTOM_DOMAIN" ]; then
+            # 先删掉模板里的单个 routes 段
+            sed -i '/^\[\[routes\]\]$/,/^$/d' "$CONFIG_FILE"
+            # 再按域名逐个生成
+            echo "$CUSTOM_DOMAIN" | tr ',' '\n' | while read -r DOMAIN_ITEM; do
+              DOMAIN_ITEM="$(echo "$DOMAIN_ITEM" | xargs)"   # 去空格
+              [ -z "$DOMAIN_ITEM" ] && continue
+              {
+                echo ""
+                echo "[[routes]]"
+                echo "pattern = \"${DOMAIN_ITEM}\""
+                echo "custom_domain = true"
+              } >> "$CONFIG_FILE"
+            done
+            echo "✅ 已配置自定义域: $CUSTOM_DOMAIN"
+          fi
           sed -i "s|\"\${DOMAIN}\"|${DOMAIN}|g" "$CONFIG_FILE"
           sed -i "s|\${ADMIN}|${ADMIN}|g" "$CONFIG_FILE"
           sed -i "s|\${JWT_SECRET}|${JWT_SECRET}|g" "$CONFIG_FILE"
