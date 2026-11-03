@@ -7,8 +7,8 @@
         <Icon class="icon" @click="changeStar" v-if="email.isStar" icon="fluent-color:star-16" width="20" height="20"/>
         <Icon class="icon" @click="changeStar" v-else icon="solar:star-line-duotone" width="18.5" height="18.5"/>
       </span>
-      <Icon class="icon" v-if="emailStore.contentData.showReply" v-perm="'email:send'"  @click="openReply" icon="fluent-mdl2:reply" width="19" height="19" />
-      <Icon class="icon" v-if="emailStore.contentData.showReply" v-perm="'email:send'"  @click="openForward" icon="iconoir:arrow-up-right" width="20" height="20" />
+      <Icon class="icon" v-if="showReplyBtn" v-perm="'email:send'"  @click="openReply" icon="fluent-mdl2:reply" width="19" height="19" />
+      <Icon class="icon" v-if="showReplyBtn" v-perm="'email:send'"  @click="openForward" icon="iconoir:arrow-up-right" width="20" height="20" />
     </div>
     <div></div>
     <el-scrollbar class="scrollbar">
@@ -83,7 +83,7 @@
 <script setup>
 import ShadowHtml from '@/components/shadow-html/index.vue'
 import {computed, reactive, ref, watch, onMounted, onUnmounted, nextTick} from "vue";
-import {useRouter} from 'vue-router'
+import {useRouter, useRoute} from 'vue-router'
 import {ElMessage, ElMessageBox} from 'element-plus'
 import {emailDelete, emailRead} from "@/request/email.js";
 import {Icon} from "@iconify/vue";
@@ -106,6 +106,7 @@ const settingStore = useSettingStore();
 const accountStore = useAccountStore();
 const emailStore = useEmailStore();
 const router = useRouter()
+const route = useRoute()
 const sendNameRef = ref(null)
 const senderWrapped = ref(false)
 let senderResizeObserver = null
@@ -223,6 +224,32 @@ function handleKeyDown(event) {
   if (writeBox && writeBox.offsetParent !== null) return;
   handleBack();
 }
+
+// 回复/转发按钮是否显示。
+// 修复：从「全部邮件」进入时 showReply 被置为 false，而 contentData 会被
+// Pinia persist 持久化到 localStorage，导致之后从收件箱进入详情页时
+// 回复按钮永久消失。改为以当前路由 mailbox 为准，不再依赖上个列表页
+// 遗留的状态。
+const showReplyBtn = computed(() => {
+  // 未登录 / 无路由参数时退回 store 中的值（保持旧行为兼容）
+  const mailbox = route.params?.mailbox
+  if (!mailbox) return emailStore.contentData.showReply
+  // 全部邮件混合了收件与发件，回复目标不明确，上游设计为不提供回复
+  if (mailbox === 'all-mail') return false
+  return true
+})
+
+// 路由切换时同步 store，清掉 localStorage 里可能残留的 false。
+// Pinia persist 会把 contentData 写进 localStorage，
+// 旧版本从「全部邮件」进入后留下的 showReply=false 会一直生效。
+watch(
+  () => route.params?.mailbox,
+  (mailbox) => {
+    if (!mailbox) return
+    emailStore.contentData.showReply = mailbox !== 'all-mail'
+  },
+  { immediate: true }
+)
 
 function openReply() {
   uiStore.writerRef.openReply(email.value)
