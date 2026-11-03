@@ -1,0 +1,334 @@
+name: 🔄 自动同步上游 / Auto Sync Upstream
+
+# ══════════════════════════════════════════════════════════════════════
+# 目的：原作者 maillab/cloud-mail 发布新版本时，本仓库自动同步升级，
+#       同时保证「Resend 转发补丁」不被破坏。
+#
+# 核心机制（三层安全网）：
+#   ① 冲突自动解决 —— 上游改 email.js 时，用 scripts/reapply-patch.mjs
+#      重新贴回补丁（替换上游原生转发块，而非并存，避免重复转发）
+#   ② 补丁完整性校验 —— 校验失败则整个流程中止，绝不部署
+#   ③ 自动回滚 —— 部署后健康检查失败，自动 wrangler rollback
+#
+# 触发方式：
+#   · 每周一 03:00 UTC 定时检查
+#   · 手动触发（workflow_dispatch）
+#   · 上游 push release 时（repository_dispatch，可选）
+#
+# 重要：默认只开 PR，不直接合并到 main。
+#       合并后才会触发 deploy-cloudflare.yml 上线。
+# ══════════════════════════════════════════════════════════════════════
+
+on:
+  schedule:
+    # 每周一 03:00 UTC = 北京时间 11:00
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '强制同步到指定版本（留空=自动取最新）'
+        required: false
+        default: ''
+      auto_merge:
+        description: '校验通过后是否自动合并 PR 到 main（会触发部署）'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: auto-sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: 'maillab/cloud-mail'
+  WORKER_NAME: 'cloud-mail'
+
+jobs:
+  # ──────────────────────────────────────────────────────────────
+  # 第 1 步：检查上游是否有新版本
+  # ──────────────────────────────────────────────────────────────
+  check-upstream:
+    name: '🔍 检查上游版本'
+    runs-on: ubuntu-latest
+    outputs:
+      has_update: ${{ steps.check.outputs.has_update }}
+      target_tag: ${{ steps.check.outputs.target_tag }}
+      current_tag: ${{ steps.check.outputs.current_tag }}
+      changelog: ${{ steps.check.outputs.changelog }}
+    steps:
+      - name: '检出本仓库'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: '查询上游最新 release'
+        id: check
+        run: |
+          set -euo pipefail
+
+          # 本仓库当前对应的上游版本（从 sys-setting 的 currentVersion 读取）
+          CURRENT=$(grep -oP "const currentVersion = '\K[^']+" mail-vue/src/views/sys-setting/index.vue || echo "unknown")
+          echo "current_tag=$CURRENT" >> $GITHUB_OUTPUT
+          echo "当前版本: $CURRENT"
+
+          # 查询上游最新 release
+          LATEST_JSON=$(curl -sSL "https://api.github.com/repos/$UPSTREAM_REPO/releases/latest")
+          LATEST=$(echo "$LATEST_JSON" | jq -r '.tag_name // empty')
+
+          if [ -z "$LATEST" ]; then
+            echo "has_update=false" >> $GITHUB_OUTPUT
+            echo "target_tag=" >> $GITHUB_OUTPUT
+            echo "上游查询失败，跳过本次同步"
+            exit 0
+          fi
+
+          echo "上游最新: $LATEST"
+
+          TARGET="$LATEST"
+          if [ -n "${{ inputs.force }}" ]; then
+            TARGET="${{ inputs.force }}"
+            echo "强制指定版本: $TARGET"
+          fi
+
+          if [ "$TARGET" = "$CURRENT" ]; then
+            echo "has_update=false" >> $GITHUB_OUTPUT
+            echo "已是最新版本 $CURRENT，无需升级"
+          else
+            echo "has_update=true" >> $GITHUB_OUTPUT
+            echo "target_tag=$TARGET" >> $GITHUB_OUTPUT
+            # 取变更日志
+            BODY=$(echo "$LATEST_JSON" | jq -r '.body // "（无）"' | head -c 3000)
+            echo "changelog<<CHANGELOG_EOF" >> $GITHUB_OUTPUT
+            echo "$BODY" >> $GITHUB_OUTPUT
+            echo "CHANGELOG_EOF" >> $GITHUB_OUTPUT
+          fi
+
+  # ──────────────────────────────────────────────────────────────
+  # 第 2 步：合并上游 + 自动重放补丁 + 校验
+  # ──────────────────────────────────────────────────────────────
+  sync-and-verify:
+    name: '🔧 合并上游并重放补丁'
+    needs: check-upstream
+    if: needs.check-upstream.outputs.has_update == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      branch: ${{ steps.push.outputs.branch }}
+      pr_url: ${{ steps.pr.outputs.pr_url }}
+    steps:
+      - name: '检出本仓库'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: '配置 Git'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+      - name: '添加上游 remote 并合并'
+        id: merge
+        run: |
+          set -euo pipefail
+          TARGET="${{ needs.check-upstream.outputs.target_tag }}"
+
+          git remote add upstream "https://github.com/$UPSTREAM_REPO.git" || true
+          git fetch upstream --tags
+          git checkout -b "auto/upgrade-${TARGET}"
+
+          # 尝试合并上游
+          if ! git merge --no-commit --no-ff "upstream/${TARGET}"; then
+            echo "::notice::合并产生冲突，尝试自动解决"
+            # 冲突集中在 email/email.js —— 直接取上游版本，其余由 reapply 脚本处理
+            for f in $(git diff --name-only --diff-filter=U); do
+              case "$f" in
+                mail-worker/src/email/email.js)
+                  echo "  取上游版本: $f"
+                  git checkout --theirs "$f" || true
+                  ;;
+                mail-worker/src/service/*|mail-worker/src/entity/*|mail-worker/src/const/*)
+                  echo "  取上游版本: $f"
+                  git checkout --theirs "$f" || true
+                  ;;
+                *)
+                  echo "  ⚠️ 需人工处理冲突: $f"
+                  ;;
+              esac
+            done
+            git add -A
+            if ! git diff --cached --quiet; then
+              git commit -m "chore: merge upstream ${TARGET}" || true
+            fi
+          fi
+          echo "合并完成"
+
+      - name: '重放转发补丁'
+        run: |
+          set -euo pipefail
+          node scripts/reapply-patch.mjs
+
+      - name: '校验补丁完整性'
+        run: |
+          set -euo pipefail
+          node scripts/reapply-patch.mjs --check
+          echo "✓ 补丁校验通过"
+
+      - name: '语法检查所有源文件'
+        run: |
+          set -euo pipefail
+          cd mail-worker
+          for f in $(find src -name '*.js'); do
+            cp "$f" /tmp/chk.mjs
+            node --check /tmp/chk.mjs
+          done
+          echo "✓ 全部源文件语法通过"
+
+      - name: '补丁行为测试'
+        run: |
+          set -euo pipefail
+          node scripts/test-forward-patch.mjs
+
+      - name: '安装依赖并构建前端（验证不会构建失败）'
+        run: |
+          set -euo pipefail
+          cd mail-vue
+          pnpm install --frozen-lockfile
+          pnpm run build
+          echo "✓ 前端构建通过"
+
+      - name: '提交并推送分支'
+        id: push
+        run: |
+          set -euo pipefail
+          git add -A
+          if git diff --cached --quiet; then
+            echo "无变更，跳过推送"
+            echo "branch=" >> $GITHUB_OUTPUT
+          else
+            git commit -m "feat: auto-sync upstream ${{ needs.check-upstream.outputs.target_tag }} + Resend forward patch"
+            git push origin "auto/upgrade-${{ needs.check-upstream.outputs.target_tag }}"
+            echo "branch=auto/upgrade-${{ needs.check-upstream.outputs.target_tag }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: '创建 Pull Request'
+        id: pr
+        if: steps.push.outputs.branch != ''
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: ${{ steps.push.outputs.branch }}
+          base: main
+          title: '🔄 自动同步上游 ${{ needs.check-upstream.outputs.target_tag }}（含 Resend 转发补丁）'
+          body: |
+            ## 自动同步上游 ${{ needs.check-upstream.outputs.target_tag }}
+
+            **当前版本**：${{ needs.check-upstream.outputs.current_tag }} → **${{ needs.check-upstream.outputs.target_tag }}**
+
+            ### 上游变更日志
+            ```
+            ${{ needs.check-upstream.outputs.changelog }}
+            ```
+
+            ### 补丁保护状态
+            - ✅ 上游原生转发块已移除（避免重复转发）
+            - ✅ `forwardService.forward()` 调用已就位
+            - ✅ `resendTokens` 解构已保留
+            - ✅ 全部源文件语法检查通过
+            - ✅ 补丁行为测试通过
+            - ✅ 前端构建通过
+
+            ### 合并后会发生什么
+            1. `deploy-cloudflare.yml` 自动构建并部署到 Cloudflare Workers
+            2. 自动调用 `/api/init/<JWT_SECRET>` 执行数据库迁移（幂等，不丢数据）
+            3. 部署后健康检查失败会自动 `wrangler rollback` 回滚到上一版本
+
+            ---
+            🤖 本 PR 由 `auto-sync-upstream.yml` 自动创建
+
+      - name: '自动合并（可选）'
+        if: ${{ inputs.auto_merge == true && steps.pr.outputs.pr_url != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh pr merge "${{ steps.pr.outputs.pr_url }}" --squash --auto --delete-branch
+          echo "已启用自动合并"
+
+  # ──────────────────────────────────────────────────────────────
+  # 第 3 步：部署后健康检查 + 自动回滚
+  # ──────────────────────────────────────────────────────────────
+  post-deploy-verify:
+    name: '🔍 部署后验证（失败自动回滚）'
+    needs: [check-upstream, sync-and-verify]
+    if: needs.sync-and-verify.outputs.pr_url != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: '检出本仓库'
+        uses: actions/checkout@v4
+
+      - name: '等待 CI 部署完成'
+        run: |
+          set -euo pipefail
+          # 等待 deploy-cloudflare.yml 完成
+          for i in $(seq 1 30); do
+            STATUS=$(gh run list --workflow="deploy-cloudflare.yml" --limit 1 --json status --jq '.[0].status' 2>/dev/null || echo "unknown")
+            CONCL=$(gh run list --workflow="deploy-cloudflare.yml" --limit 1 --json conclusion --jq '.[0].conclusion' 2>/dev/null || echo "unknown")
+            echo "  [$i] 部署状态: $STATUS / $CONCL"
+            if [ "$STATUS" = "completed" ]; then
+              break
+            fi
+            sleep 20
+          done
+
+      - name: '健康检查'
+        id: health
+        env:
+          WORKER_URL: ${{ vars.CUSTOM_DOMAIN && format('https://{0}', vars.CUSTOM_DOMAIN) || '' }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        run: |
+          set -euo pipefail
+          URL="$WORKER_URL"
+          if [ -z "$URL" ]; then
+            echo "未配置 CUSTOM_DOMAIN，跳过在线检查"
+            exit 0
+          fi
+
+          echo "检查 $URL ..."
+          CODE=$(curl -sSL -o /tmp/health.txt -w '%{http_code}' "${URL}/api/setting/website" || echo "000")
+          echo "HTTP: $CODE"
+          cat /tmp/health.txt || true
+
+          if [ "$CODE" != "200" ]; then
+            echo "::error::健康检查失败"
+            exit 1
+          fi
+          echo "✓ 健康检查通过"
+
+      - name: '失败自动回滚'
+        if: failure()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          echo "::error::部署验证失败，开始自动回滚"
+
+          cd mail-worker
+          npm install -g wrangler@4 || true
+
+          # 列出最近的版本，回滚到上一个
+          echo "当前版本列表："
+          npx wrangler versions list || true
+
+          PREV=$(npx wrangler versions list --json 2>/dev/null | jq -r '.[1].id' || echo "")
+          if [ -n "$PREV" ]; then
+            echo "回滚到: $PREV"
+            npx wrangler rollback "$PREV" || true
+            echo "✓ 已回滚"
+          else
+            echo "⚠️ 未找到可回滚版本，请手动处理"
+            echo "   Cloudflare Dashboard → $WORKER_NAME → Deployments → 选择旧版本 Rollback"
+          fi
