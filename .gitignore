@@ -28,3 +28,6 @@ mail-vue/dist
 
 # 本地部署专用配置（含真实 D1/KV/R2 ID 与 jwt_secret，不入库）
 mail-worker/wrangler.toml
+
+# 临时测试文件
+wt-*.toml
