@@ -40,18 +40,22 @@ crons = ["0 16 * * *"]
 
 
 [vars]
-ai_model = "${AI_MODEL}"
-analysis_cache = "${ANALYSIS_CACHE}"
+ai_model = '${AI_MODEL}'
+analysis_cache = '${ANALYSIS_CACHE}'
 #orm_log = false
-domain = "${DOMAIN}"
-admin = "${ADMIN}"
-jwt_secret = "${JWT_SECRET}"
-project_link = "${PROJECT_LINK}"
+# ★ 用单引号包裹：DOMAIN 的值是 JSON 数组 ["a.com","b.com"]，
+# 若用双引号会替换成 domain = "["a.com","b.com"]" —— 嵌套引号导致
+# TOML 解析失败，wrangler 会静默丢弃所有绑定，线上报
+# "D1数据库未绑定 / KV database not bound"。
+domain = '${DOMAIN}'
+admin = '${ADMIN}'
+jwt_secret = '${JWT_SECRET}'
+project_link = '${PROJECT_LINK}'
 
-linuxdo_client_id = "${LINUXDO_CLIENT_ID}"
-linuxdo_client_secret = "${LINUXDO_CLIENT_SECRET}"
-linuxdo_callback_url = "${LINUXDO_CALLBACK_URL}"
-linuxdo_switch = "${LINUXDO_SWITCH}"
+linuxdo_client_id = '${LINUXDO_CLIENT_ID}'
+linuxdo_client_secret = '${LINUXDO_CLIENT_SECRET}'
+linuxdo_callback_url = '${LINUXDO_CALLBACK_URL}'
+linuxdo_switch = '${LINUXDO_SWITCH}'
 
 [build]
 command = "pnpm --prefix ../mail-vue install && pnpm --prefix ../mail-vue run build"

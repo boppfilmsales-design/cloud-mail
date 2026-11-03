@@ -256,8 +256,62 @@ jobs:
             echo "::add-mask::$WORKER_URL"
           fi
           
+          # 记录本次部署的版本 id，供回滚时排除
+          DEPLOYED_VERSION=$(pnpm wrangler versions list --json 2>/dev/null \
+            | jq -r '.[0].id' 2>/dev/null || echo "")
+          if [ -n "$DEPLOYED_VERSION" ]; then
+            echo "version_id=$DEPLOYED_VERSION" >> $GITHUB_OUTPUT
+            echo "📌 Deployed version: $DEPLOYED_VERSION"
+          fi
+          
           echo "worker_url=$WORKER_URL" >> $GITHUB_OUTPUT
           echo "✅ Setup completed."
+
+      - name: 🔍 校验部署绑定 / Verify bindings
+        run: |
+          # ★ 部署后自检：TOML 解析失败时 wrangler 会静默丢弃所有绑定，
+          #   线上表现为 "D1数据库未绑定 / KV database not bound"。
+          #   这里主动探测，失败立即回滚到上一个可用版本。
+          echo "🔍 Verifying Worker bindings..."
+          sleep 8
+
+          CHECK_URL="${CUSTOM_DOMAIN:+https://$(echo "$CUSTOM_DOMAIN" | cut -d, -f1)}"
+          CHECK_URL="${CHECK_URL:-${{ steps.deploy.outputs.worker_url }}}"
+          if [ -z "$CHECK_URL" ]; then
+            echo "::warning:: No URL to verify, skip."
+            exit 0
+          fi
+
+          # /api/init/<secret> 会同时触碰 D1 与 KV；
+          # 绑定缺失时返回 502 且消息含 "未绑定" / "not bound"
+          BODY=$(curl -sL --max-time 60 "$CHECK_URL/api/init/${JWT_SECRET}" || echo "")
+          echo "  Response: ${BODY:0:200}"
+
+          if echo "$BODY" | grep -qiE "not bound|未绑定"; then
+            echo "❌ 绑定缺失，部署无效！正在回滚..."
+            echo "::error::Bindings missing after deploy - rolling back"
+
+            # 回滚到上一个可用版本（排除本次部署的版本）
+            DEPLOYED_VERSION="${{ steps.deploy.outputs.version_id }}"
+            PREV_VERSION=$(pnpm wrangler versions list --json 2>/dev/null \
+              | jq -r --arg cur "$DEPLOYED_VERSION" \
+                 '[.[] | select(.id != $cur)] | .[0].id' 2>/dev/null || echo "")
+
+            if [ -n "$PREV_VERSION" ] && [ "$PREV_VERSION" != "null" ]; then
+              echo "↩️ Rolling back to $PREV_VERSION"
+              pnpm wrangler rollback "$PREV_VERSION" --yes || true
+              echo "✅ 已回滚。线上已恢复到上一个可用版本。"
+            else
+              echo "::error::未找到可回滚版本，请手动在 Dashboard 回滚到上一个版本"
+            fi
+            exit 1
+          fi
+
+          if [ "$BODY" = "success" ]; then
+            echo "✅ 绑定正常，部署校验通过"
+          else
+            echo "::warning::Unexpected response, but no binding error detected."
+          fi
 
       - name: ♻️ 初始化数据库 / Initialize database
         run: |
