@@ -178,11 +178,11 @@ export async function email(message, env, ctx) {
 			await telegramService.sendEmailToBot({ env }, emailRow)
 		}
 
+
+
 		// 转发到其他邮箱（自定义补丁：Resend 优先 + 失败回退 + 同域跳过）
 		// 逻辑见 service/forward-service.js
 		await forwardService.forward({ env }, { message, email, params, attachments, resendTokens });
-
-
 
 		//转发到 Webhook
 		if (webhookStatus === settingConst.webhookStatus.OPEN && webhookUrl) {

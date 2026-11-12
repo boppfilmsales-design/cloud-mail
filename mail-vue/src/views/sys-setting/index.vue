@@ -460,7 +460,7 @@
               </div>
               <div class="concerning-item">
                 <span>{{ $t('support') }} : </span>
-                <el-button @click="jump('https://doc.skymail.ink/support.html')">
+                <el-button @click="jump('https://docs.skymail.ink/support.html')">
                   {{ t('supportDesc') }}
                   <template #icon>
                     <Icon color="#79D6B5" icon="simple-icons:buymeacoffee" width="20" height="20"/>
@@ -469,7 +469,7 @@
               </div>
               <div class="concerning-item">
                 <span>{{ $t('help') }} : </span>
-                <el-button @click="jump('https://doc.skymail.ink')">
+                <el-button @click="jump('https://docs.skymail.ink')">
                   {{ t('document') }}
                   <template #icon>
                     <Icon color="#79D6B5" icon="fluent-color:document-32" width="18" height="18"/>
@@ -932,7 +932,7 @@ defineOptions({
   name: 'sys-setting'
 })
 
-const currentVersion = 'v3.4.0'
+const currentVersion = 'v3.5.0'
 const hasUpdate = ref(false)
 let getUpdateErrorCount = 1;
 const {t, locale} = useI18n();

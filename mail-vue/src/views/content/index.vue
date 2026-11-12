@@ -7,8 +7,8 @@
         <Icon class="icon" @click="changeStar" v-if="email.isStar" icon="fluent-color:star-16" width="20" height="20"/>
         <Icon class="icon" @click="changeStar" v-else icon="solar:star-line-duotone" width="18.5" height="18.5"/>
       </span>
-      <Icon class="icon" v-if="showReplyBtn" v-perm="'email:send'"  @click="openReply" icon="fluent-mdl2:reply" width="19" height="19" />
-      <Icon class="icon" v-if="showReplyBtn" v-perm="'email:send'"  @click="openForward" icon="iconoir:arrow-up-right" width="20" height="20" />
+      <Icon class="icon" v-if="emailStore.contentData.showReply" v-perm="'email:send'"  @click="openReply" icon="fluent-mdl2:reply" width="19" height="19" />
+      <Icon class="icon" v-if="emailStore.contentData.showReply" v-perm="'email:send'"  @click="openForward" icon="iconoir:arrow-up-right" width="20" height="20" />
     </div>
     <div></div>
     <el-scrollbar class="scrollbar">
@@ -18,7 +18,7 @@
         </div>
         <div class="content">
           <div class="email-info">
-            <div>
+            <div class="address-meta">
               <div class="send"><span class="send-source">{{$t('from')}}</span>
                 <div class="send-name" ref="sendNameRef" :class="{ 'is-wrapped': senderWrapped }">
                   <span class="send-name-title">{{ email.name }}</span>
@@ -33,6 +33,7 @@
                 </div>
               </div>
               <div class="receive"><span class="source">{{$t('recipient')}}</span><span class="receive-email">{{  formateReceive(email.recipient) }}</span></div>
+              <div class="receive" v-if="ccText"><span class="source">{{$t('cc')}}</span><span class="receive-email">{{ ccText }}</span></div>
               <div class="date">
                 <div>{{ formatDetailDate(email.createTime) }}</div>
               </div>
@@ -83,7 +84,7 @@
 <script setup>
 import ShadowHtml from '@/components/shadow-html/index.vue'
 import {computed, reactive, ref, watch, onMounted, onUnmounted, nextTick} from "vue";
-import {useRouter, useRoute} from 'vue-router'
+import {useRouter} from 'vue-router'
 import {ElMessage, ElMessageBox} from 'element-plus'
 import {emailDelete, emailRead} from "@/request/email.js";
 import {Icon} from "@iconify/vue";
@@ -106,7 +107,6 @@ const settingStore = useSettingStore();
 const accountStore = useAccountStore();
 const emailStore = useEmailStore();
 const router = useRouter()
-const route = useRoute()
 const sendNameRef = ref(null)
 const senderWrapped = ref(false)
 let senderResizeObserver = null
@@ -122,6 +122,8 @@ const email = computed(() => emailStore.contentData.email || {
   text: '',
   recipient: '[]',
 })
+
+const ccText = computed(() => formateReceive(email.value.cc))
 
 const sentViaEmail = computed(() => {
   const raw = String(email.value.senderEmail || '').trim()
@@ -224,31 +226,6 @@ function handleKeyDown(event) {
   if (writeBox && writeBox.offsetParent !== null) return;
   handleBack();
 }
-
-// 回复/转发按钮是否显示。
-// 修复：从「全部邮件」进入时 showReply 被置为 false，而 contentData 会被
-// Pinia persist 持久化到 localStorage，导致之后从收件箱进入详情页时
-// 回复按钮永久消失。改为以当前路由 mailbox 为准，不再依赖上个列表页
-// 遗留的状态。
-const showReplyBtn = computed(() => {
-  // 所有邮件列表入口都允许回复与转发，包括「全部邮件」。
-  // 上游把 all-mail 的 showReply 设为 false（混合列表里回复目标不明确），
-  // 但 contentData 会被 Pinia persist 写进 localStorage，
-  // 导致从「全部邮件」进入后，其它入口的回复按钮也永久消失。
-  // 这里改为不依赖 store，直接以路由判断并对全部入口放行。
-  return true
-})
-
-// 路由切换时同步 store，清掉 localStorage 里可能残留的 false。
-// Pinia persist 会把 contentData 写进 localStorage，
-// 旧版本从「全部邮件」进入后留下的 showReply=false 会一直生效。
-watch(
-  () => route.params?.mailbox,
-  () => {
-    emailStore.contentData.showReply = true
-  },
-  { immediate: true }
-)
 
 function openReply() {
   uiStore.writerRef.openReply(email.value)
@@ -493,10 +470,20 @@ const handleDelete = () => {
         margin-bottom: 15px;
       }
 
-      .send {
-        display: flex;
-        margin-bottom: 6px;
+      .address-meta {
+        display: grid;
+        grid-template-columns: max-content minmax(0, 1fr);
+        column-gap: 10px;
+        row-gap: 6px;
+        align-items: baseline;
+      }
 
+      .send,
+      .receive {
+        display: contents;
+      }
+
+      .send {
         .send-name {
           color: var(--regular-text-color);
           display: flex;
@@ -527,8 +514,6 @@ const handleDelete = () => {
       }
 
       .receive {
-        margin-bottom: 6px;
-        display: flex;
         .receive-email {
           max-width: 700px;
           word-break: break-word;
@@ -538,16 +523,15 @@ const handleDelete = () => {
         }
       }
 
-      .send-source {
-        white-space: nowrap;
-        font-weight: bold;
-        padding-right: 10px;
+      .date {
+        grid-column: 1 / -1;
       }
 
+      .send-source,
       .source {
         white-space: nowrap;
         font-weight: bold;
-        padding-right: 10px;
+        text-align: left;
       }
     }
   }
